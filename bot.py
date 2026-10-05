@@ -252,7 +252,7 @@ async def process_gift_link(callback: CallbackQuery, state: FSMContext):
     text = (
         "🎁 **Gift link ဈေးနှုန်းများ:**\n"
         "• 3 months ✍️ 55,000 ks\n"
-        "• 6 months ✍️️ 74,000 ks\n"
+        "• 6 months ✍ 74,000 ks\n"
         "• 12 months ✍️ 135,000 ks\n\n"
         "🤩 Wave - 09448835260 (Kaung Si Thu)\n"
         "🤩 Kpay - 09752828949 (Aye Sandar Moe)\n\n"
@@ -291,7 +291,7 @@ async def process_telegram_star(callback: CallbackQuery, state: FSMContext):
         "• 150 ➡️ 12,000 ks \n"
         "• 200 ➡️ 16,000 ks \n"
         "• 300 ➡️ 24,000 ks \n"
-        "• 500 ➡️️ 40,000 ks\n"
+        "• 500 ➡ 40,000 ks\n"
         "• 1000 ➡️ 80,000 ks\n\n"
         "🤩 Wave - 09448835260 (Kaung Si Thu)\n"
         "🤩 Kpay - 09752828949 (Aye Sandar Moe)\n\n"
@@ -606,7 +606,6 @@ async def process_approve_premium(callback: CallbackQuery):
             await db.execute("UPDATE payments SET status = 'Approved' WHERE user_id = ? AND purpose LIKE '%Telegram Premium%'", (target_user_id,))
             await db.commit()
 
-        # User ထံသို့ ဝယ်ယူပြီးကြောင်း အကျိုးအကြောင်း အသိပေးချက်ပို့ခြင်း
         await bot.send_message(
             chat_id=target_user_id,
             text=(
@@ -830,7 +829,8 @@ async def main():
     
     print(f"Webhook Bot started on port {port} with structured Telegram Premium flow...")
     
-    async asyncio.Event().wait()
+    # ပြင်ဆင်ထားသည့် နေရာ (async အား ဖြုတ်လိုက်ပါပြီ)
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
