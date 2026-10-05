@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -27,12 +28,13 @@ WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}" if RENDER_EXTERNAL_URL else "https://kasn
 WEBHOOK_PATH = f"/bot/{TOKEN}"
 BASE_WEBHOOK_URL = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
 
+DB_FILE = "bot_database.db"
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 admin_msg_tracker = {}
 
-# အကိုပေးထားသော လမ်းညွှန်စာရင်းအသစ်အတိုင်း ထည့်သွင်းထားပါသည်
 ADS_CHANNELS = [
     {"name": "@kasnreviews", "id": "@kasnreviews"},
     {"name": "@movieblablabla", "id": "@movieblablabla"},
@@ -72,6 +74,38 @@ ADS_CHANNELS = [
 class UserState(StatesGroup):
     waiting_for_vip_slip = State()
     waiting_for_class_slip = State()
+    waiting_for_premium_slip = State()
+    waiting_for_broadcast = State()
+
+async def init_db():
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                full_name TEXT,
+                username TEXT,
+                joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                purpose TEXT,
+                status TEXT,
+                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.commit()
+
+async def register_user(user_id: int, full_name: str, username: str):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
+            INSERT INTO users (user_id, full_name, username) 
+            VALUES (?, ?, ?) 
+            ON CONFLICT(user_id) DO UPDATE SET full_name=?, username=?
+        """, (user_id, full_name, username, full_name, username))
+        await db.commit()
 
 def get_main_menu():
     keyboard = InlineKeyboardMarkup(
@@ -79,6 +113,7 @@ def get_main_menu():
             [InlineKeyboardButton(text="🎬 Free Movie Channels များကို ဝင်ရန်", callback_data="free_movies")],
             [InlineKeyboardButton(text="📚 Online Class တက်ရောက်ရန်", callback_data="online_class")],
             [InlineKeyboardButton(text="💎 VIP Channel သို့ ဝင်ရောက်ရန်", callback_data="vip_channel")],
+            [InlineKeyboardButton(text="⭐ Telegram Premium ဝယ်ယူရန်", callback_data="telegram_premium")],
             [InlineKeyboardButton(text="📢 ကြော်ငြာစုံစမ်းဆွေးနွေးရန်", callback_data="ads_inquiry")],
             [InlineKeyboardButton(text="💬 ဆက်သွယ်ရန် / Admin သို့ စကားပြောရန်", callback_data="contact_admin")]
         ]
@@ -88,16 +123,59 @@ def get_main_menu():
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
+    user = message.from_user
+    await register_user(user.id, user.full_name, user.username)
+    
     welcome_text = (
         "မင်္ဂလာပါခင်ဗျာ 👋\n"
         "KASN Movie Platform မှ ကြိုဆိုပါတယ်။\n\n"
         "📌 အသုံးပြုပုံ လမ်းညွှန်ချက် (FAQ):\n"
-        "• VIP Channel ဝင်လိုပါက နှိပ်ပြီး ငွေလွဲကာ ပြေစာပုံ ပို့ပေးပါ။\n"
-        "• Online Class တက်လိုပါက အချက်အလက်ကြည့်ပြီး ပြေစာပုံ ပို့ပေးပါ။\n"
-        "• ကြော်ငြာထည့်လိုပါက ကြော်ငြာစုံစမ်းဆွေးနွေးရန် ကို နှိပ်နိုင်ပါသည်။\n\n"
+        "• Telegram Premium ဝယ်ယူလိုပါက သက်ဆိုင်ရာ ဈေးနှုန်းများကို ကြည့်ရှုနိုင်ပါသည်။\n"
+        "• VIP Channel ဝင်လိုပါက ငွေလွဲကာ ပြေစာပုံ ပို့ပေးပါ။\n"
+        "• Online Class တက်လိုပါက အချက်အလက်ကြည့်ပြီး ပြေစာပုံ ပို့ပေးပါ။\n\n"
         "အောက်ပါတို့အနက်မှ လိုအပ်ရာကို ရွေးချယ်နိုင်ပါတယ် -"
     )
     await message.answer(text=welcome_text, reply_markup=get_main_menu())
+
+@dp.message(Command("stats"), F.from_user.id.in_(ADMIN_IDS))
+async def cmd_stats(message: Message):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
+            row = await cursor.fetchone()
+            total_users = row[0] if row else 0
+            
+    await message.answer(f"📊 Bot အသုံးပြုသူ စုစုပေါင်း (Total Users): `{total_users:,}` ယောက် ရှိပါပြီ။")
+
+@dp.message(Command("broadcast"), F.from_user.id.in_(ADMIN_IDS))
+async def cmd_broadcast(message: Message, state: FSMContext):
+    await state.set_state(UserState.waiting_for_broadcast)
+    await message.answer("📢 Member များအားလုံးဆီသို့ ပို့လိုသော ကြေညာချက် (စာသား သို့မဟုတ် ပုံ) ကို ပို့ပေးပါ။")
+
+@dp.message(UserState.waiting_for_broadcast, F.from_user.id.in_(ADMIN_IDS))
+async def process_broadcast(message: Message, state: FSMContext):
+    await state.clear()
+    
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT user_id FROM users") as cursor:
+            users = await cursor.fetchall()
+            
+    sent_count = 0
+    fail_count = 0
+    
+    status_msg = await message.answer("⏳ Broadcast ပို့ဆောင်နေပါပြီ ခဏစောင့်ပါ...")
+    
+    for (user_id,) in users:
+        try:
+            if message.photo:
+                await bot.send_photo(chat_id=user_id, photo=message.photo[-1].file_id, caption=message.caption)
+            elif message.text:
+                await bot.send_message(chat_id=user_id, text=message.text)
+            sent_count += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            fail_count += 1
+            
+    await status_msg.edit_text(f"✅ Broadcast ပြီးဆုံးပါပြီ!\n\n📤 အောင်မြင်စွာ ရောက်ရှိသူ: `{sent_count}`\n❌ ပို့မရသူ: `{fail_count}`")
 
 @dp.callback_query(F.data == "free_movies")
 async def process_free_movies(callback: CallbackQuery, state: FSMContext):
@@ -139,6 +217,104 @@ async def process_vip_channel(callback: CallbackQuery, state: FSMContext):
         "ငွေလွဲပြီး ပြေစာပုံ ပို့ထားပေးပါခင်ဗျာ ။"
     )
     await callback.message.answer(vip_text)
+    await callback.answer()
+
+@dp.callback_query(F.data == "telegram_premium")
+async def process_telegram_premium(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎁 Gift link", callback_data="prem_gift_link")],
+            [InlineKeyboardButton(text="🎁 Gift plan", callback_data="prem_gift_plan")],
+            [InlineKeyboardButton(text="⭐ Telegram Star", callback_data="prem_star")],
+            [InlineKeyboardButton(text="📱 SMS Fee", callback_data="prem_sms_fee")],
+            [InlineKeyboardButton(text="⬅ ပင်မမီနူးသို့ ပြန်ရန်", callback_data="back_to_menu")]
+        ]
+    )
+    text = (
+        "✅ **Admin ဆီမှာ Telegram Premium ဝယ်ယူရန်**\n"
+        "_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _\n\n"
+        "ဝယ်ယူလိုသော အမျိုးအစား (Plan) တစ်ခုကို အောက်ပါတို့မှ ရွေးချယ်ပါ -"
+    )
+    await callback.message.answer(text, reply_markup=keyboard)
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_menu")
+async def process_back_to_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    welcome_text = "အောက်ပါတို့အနက်မှ လိုအပ်ရာကို ထပ်မံရွေးချယ်နိုင်ပါတယ် -"
+    await callback.message.answer(text=welcome_text, reply_markup=get_main_menu())
+    await callback.answer()
+
+@dp.callback_query(F.data == "prem_gift_link")
+async def process_gift_link(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(UserState.waiting_for_premium_slip)
+    text = (
+        "🎁 **Gift link ဈေးနှုန်းများ:**\n"
+        "• 3 months ✍️ 55,000 ks\n"
+        "• 6 months ✍️️ 74,000 ks\n"
+        "• 12 months ✍️ 135,000 ks\n\n"
+        "🤩 Wave - 09448835260 (Kaung Si Thu)\n"
+        "🤩 Kpay - 09752828949 (Aye Sandar Moe)\n\n"
+        "📌 **[ရွေးချယ်ထားသည်: Gift link]**\n"
+        "ငွေလွဲပြီးပါက ပြေစာပုံနှင့် လိုအပ်သော အချက်အလက်များကို ယခု Chat ထဲသို့ ပို့ပေးပါခင်ဗျာ။\n\n"
+        "ဆက်သွယ်ရန် - @milimeterz"
+    )
+    await callback.message.answer(text)
+    await callback.answer()
+
+@dp.callback_query(F.data == "prem_gift_plan")
+async def process_gift_plan(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(UserState.waiting_for_premium_slip)
+    text = (
+        "🎁 **Gift plan ဈေးနှုန်းများ:**\n"
+        "• 3 months ➡️ 58,000 ks \n"
+        "• 6 months ➡️ 78,000 ks\n"
+        "• 1 years  ➡️ 137,000 ks\n"
+        "*(Gift plan ➡️ username ပေးရုံသာလို)*\n\n"
+        "🤩 Wave - 09448835260 (Kaung Si Thu)\n"
+        "🤩 Kpay - 09752828949 (Aye Sandar Moe)\n\n"
+        "📌 **[ရွေးချယ်ထားသည်: Gift plan]**\n"
+        "ငွေလွဲပြီးပါက ပြေစာပုံနှင့်အတူ သင့်ရဲ့ Username ကို ယခု Chat ထဲသို့ ပို့ပေးပါခင်ဗျာ။\n\n"
+        "ဆက်သွယ်ရန် - @milimeterz"
+    )
+    await callback.message.answer(text)
+    await callback.answer()
+
+@dp.callback_query(F.data == "prem_star")
+async def process_telegram_star(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(UserState.waiting_for_premium_slip)
+    text = (
+        "⭐ **Telegram Star ဈေးနှုန်းများ:**\n"
+        "• 50 ➡️ 4,000 ks \n"
+        "• 100 ➡️ 8,000 ks\n"
+        "• 150 ➡️ 12,000 ks \n"
+        "• 200 ➡️ 16,000 ks \n"
+        "• 300 ➡️ 24,000 ks \n"
+        "• 500 ➡️️ 40,000 ks\n"
+        "• 1000 ➡️ 80,000 ks\n\n"
+        "🤩 Wave - 09448835260 (Kaung Si Thu)\n"
+        "🤩 Kpay - 09752828949 (Aye Sandar Moe)\n\n"
+        "📌 **[ရွေးချယ်ထားသည်: Telegram Star]**\n"
+        "ငွေလွဲပြီးပါက ပြေစာပုံနှင့်အတူ လိုအပ်သော Username (သို့မဟုတ်) အချက်အလက်များကို ပို့ပေးပါခင်ဗျာ။\n\n"
+        "ဆက်သွယ်ရန် - @milimeterz"
+    )
+    await callback.message.answer(text)
+    await callback.answer()
+
+@dp.callback_query(F.data == "prem_sms_fee")
+async def process_sms_fee(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(UserState.waiting_for_premium_slip)
+    text = (
+        "📱 **SMS Fee:**\n"
+        "• ကြီးကြပ်ကြေး ➡️ 9,500 ks\n\n"
+        "🤩 Wave - 09448835260 (Kaung Si Thu)\n"
+        "🤩 Kpay - 09752828949 (Aye Sandar Moe)\n\n"
+        "📌 **[ရွေးချယ်ထားသည်: SMS Fee]**\n"
+        "ငွေလွဲပြီးပါက ပြေစာပုံနှင့် လိုအပ်သော အချက်အလက်များကို ပို့ပေးပါခင်ဗျာ။\n\n"
+        "ဆက်သွယ်ရန် - @milimeterz"
+    )
+    await callback.message.answer(text)
     await callback.answer()
 
 @dp.callback_query(F.data == "contact_admin")
@@ -206,7 +382,6 @@ async def process_ads_view_each(callback: CallbackQuery, state: FSMContext):
         channel_identifier = ch["id"]
         subs = 0
         
-        # အောက်ဆုံးရောက်သွားသော ID (-1002704169981) အတွက် Default Sub ကို သတ်မှတ်ပေးခြင်း
         if channel_identifier == -1002704169981:
             subs = 77460
         else:
@@ -240,7 +415,6 @@ async def process_ads_view_total(callback: CallbackQuery, state: FSMContext):
         channel_identifier = ch["id"]
         subs = 0
         
-        # အောက်ဆုံးရောက်သွားသော ID (-1002704169981) အတွက် Default Sub ကို သတ်မှတ်ပေးခြင်း
         if channel_identifier == -1002704169981:
             subs = 77460
         else:
@@ -273,19 +447,30 @@ async def handle_payment_screenshot(message: Message, state: FSMContext):
         purpose = "💎 ဝယ်ယူသည့်အမျိုးအစား: VIP Channel"
     elif current_state == UserState.waiting_for_class_slip.state:
         purpose = "📚 ဝယ်ယူသည့်အမျိုးအစား: Online Class"
+    elif current_state == UserState.waiting_for_premium_slip.state:
+        purpose = "⭐ ဝယ်ယူသည့်အမျိုးအစား: Telegram Premium / Stars"
     else:
         purpose = "❓ ဝယ်ယူသည့်အမျိုးအစား: မသတ်မှတ်ရသေးပါ"
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("INSERT INTO payments (user_id, purpose, status) VALUES (?, ?, ?)", 
+                         (user.id, purpose, "Pending"))
+        await db.commit()
 
     user_info = f"📩 ငွေလွဲပြေစာ အသစ်ရောက်ရှိပါပြီ!\n\n" \
                 f"{purpose}\n" \
                 f"👤 အမည်: {user.full_name}\n" \
                 f"🔗 Username: @{user.username if user.username else 'None'}\n" \
                 f"🆔 User ID: {user.id}"
+                
+    if message.caption:
+        user_info += f"\n📝 User မှ ပူးတွဲရေးသားချက်: {message.caption}"
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💎 VIP Channel သို့ ထည့်ရန်", callback_data=f"approve_vip_{user.id}")],
-            [InlineKeyboardButton(text="📚 Online Class သို့ ထည့်ရန်", callback_data=f"approve_class_{user.id}")]
+            [InlineKeyboardButton(text="📚 Online Class သို့ ထည့်ရန်", callback_data=f"approve_class_{user.id}")],
+            [InlineKeyboardButton(text="⭐ Telegram Premium ဝယ်ယူပြီးကြောင်း အကြောင်းကြားရန်", callback_data=f"approve_premium_{user.id}")]
         ]
     )
 
@@ -304,7 +489,7 @@ async def handle_payment_screenshot(message: Message, state: FSMContext):
         except Exception as e:
             print(f"ERROR: Failed to send photo to admin {admin_id}: {e}")
 
-    await message.answer("ကျေးဇူးတင်ပါတယ်ခင်ဗျာ 🙏 ငွေလွဲပြေစာကို Admin ထံသို့ ပို့ပေးလိုက်ပါပြီ။ Admin မှ စစ်ဆေးပြီးပါက ချန်နယ်လင့်ခ် ပို့ပေးပါမည်။")
+    await message.answer("ကျေးဇူးတင်ပါတယ်ခင်ဗျာ 🙏 ငွေလွဲပြေစာနှင့် အချက်အလက်များကို Admin ထံသို့ ပို့ပေးလိုက်ပါပြီ။ Admin မှ စစ်ဆေးပြီး ဆက်လက်ဆောင်ရွက်ပေးပါမည်။")
     await state.clear()
 
 @dp.callback_query(F.data.startswith("approve_vip_"))
@@ -317,6 +502,10 @@ async def process_approve_vip(callback: CallbackQuery):
             chat_id=VIP_CHANNEL_ID,
             creates_join_request=True
         )
+
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute("UPDATE payments SET status = 'Approved' WHERE user_id = ? AND purpose LIKE '%VIP Channel%'", (target_user_id,))
+            await db.commit()
 
         await bot.send_message(
             chat_id=target_user_id,
@@ -366,6 +555,10 @@ async def process_approve_class(callback: CallbackQuery):
             creates_join_request=True
         )
 
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute("UPDATE payments SET status = 'Approved' WHERE user_id = ? AND purpose LIKE '%Online Class%'", (target_user_id,))
+            await db.commit()
+
         await bot.send_message(
             chat_id=target_user_id,
             text=f"🎉 သင်၏ Online Class ငွေလွဲပြေစာ အတည်ပြုပြီးပါပြီ!\n\n"
@@ -401,6 +594,57 @@ async def process_approve_class(callback: CallbackQuery):
 
     except Exception as e:
         print(f"ERROR: Failed to approve Online Class for user {target_user_id}: {e}")
+        await callback.answer(f"❌ အမှားဖြစ်ပေါ်နေပါသည်: {e}", show_alert=True)
+
+@dp.callback_query(F.data.startswith("approve_premium_"))
+async def process_approve_premium(callback: CallbackQuery):
+    target_user_id = int(callback.data.split("_")[2])
+    tracker_key = f"payment_{target_user_id}"
+
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute("UPDATE payments SET status = 'Approved' WHERE user_id = ? AND purpose LIKE '%Telegram Premium%'", (target_user_id,))
+            await db.commit()
+
+        # User ထံသို့ ဝယ်ယူပြီးကြောင်း အကျိုးအကြောင်း အသိပေးချက်ပို့ခြင်း
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "🎉 **ဂုဏ်ယူပါတယ်ခင်ဗျာ!**\n\n"
+                "သင့်ရဲ့ ငွေလွဲပြေစာနှင့် အချက်အလက်များကို Admin မှ စစ်ဆေးအတည်ပြုပြီးဖြစ်ပါ၍ **Telegram Premium / Stars** ကို အောင်မြင်စွာ ဝယ်ယူထည့်သွင်းပေးလိုက်ပါပြီခင်ဗျာ။ ✨\n\n"
+                "ယခုအခါမှာ သင့်အကောင့်တွင် Premium ဖစ်ချာများကို အပြည့်အစုံ အသုံးပြုနိုင်ပြီဖြစ်ပါတယ်။ "
+                "ယုံကြည်စိတ်ချစွာဖြင့် အားပေးမှုအတွက် ကျေးဇူးအထူးတင်ရှိပါတယ်ခင်ဗျာ 🙏\n\n"
+                "ဆက်သွယ်ရန် - @milimeterz"
+            )
+        )
+
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    chat_id=admin_id,
+                    text=f"✅ **Telegram Premium ဝယ်ယူပြီးကြောင်း အကြောင်းကြားပြီးပါပြီ** (ဆောင်ရွက်သူ: {callback.from_user.full_name})\n\n"
+                         f"👤 User ID: `{target_user_id}`"
+                )
+            except:
+                pass
+
+        if tracker_key in admin_msg_tracker:
+            for admin_id, msg_id in admin_msg_tracker[tracker_key].items():
+                try:
+                    await bot.edit_message_caption(
+                        chat_id=admin_id,
+                        message_id=msg_id,
+                        caption=callback.message.caption + f"\n\n✅ [Telegram Premium ဝယ်ယူပြီးကြောင်း အကြောင်းကြားပြီး ({callback.from_user.full_name})]",
+                        reply_markup=None
+                    )
+                except:
+                    pass
+            del admin_msg_tracker[tracker_key]
+
+        await callback.answer("✅ User ထံသို့ Telegram Premium ဝယ်ယူပြီးကြောင်း အောင်မြင်စွာ ပို့ပြီးပါပြီ။")
+
+    except Exception as e:
+        print(f"ERROR: Failed to approve Premium for user {target_user_id}: {e}")
         await callback.answer(f"❌ အမှားဖြစ်ပေါ်နေပါသည်: {e}", show_alert=True)
 
 @dp.chat_join_request()
@@ -559,6 +803,7 @@ async def admin_reply_handler(message: Message):
     await message.reply("💡 User ဆီ စာပြန်လိုပါက ပုံကို Reply လုပ်၍ စာ/ပုံ ပို့ပါ။")
 
 async def on_startup(bot: Bot):
+    await init_db()
     await bot.set_webhook(BASE_WEBHOOK_URL, allowed_updates=["message", "callback_query", "chat_join_request"])
 
 async def main():
@@ -583,9 +828,9 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     
-    print(f"Webhook Bot started on port {port}...")
+    print(f"Webhook Bot started on port {port} with structured Telegram Premium flow...")
     
-    await asyncio.Event().wait()
+    async asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
